@@ -48,9 +48,9 @@ async def test_convenience_methods(
         seen["method"] = request.method
         return Response("ok", status=200)
 
-    httpserver.expect_request("/verb", method=expected_method).respond_with_handler(
-        handler
-    )
+    httpserver.expect_request(
+        "/verb", method=expected_method
+    ).respond_with_handler(handler)
     with Session() as session:
         method = getattr(session, method_name)
         response = await method(httpserver.url_for("/verb"))
@@ -64,7 +64,9 @@ async def test_429_then_200(httpserver: HTTPServer) -> None:
     def handler(request: Request) -> Response:
         state["count"] += 1
         if state["count"] == 1:
-            return Response("slow down", status=429, headers={"Retry-After": "1"})
+            return Response(
+                "slow down", status=429, headers={"Retry-After": "1"}
+            )
         return Response("ok", status=200)
 
     httpserver.expect_request("/retry").respond_with_handler(handler)
@@ -90,7 +92,9 @@ async def test_global_lock_coordinates_threads(httpserver: HTTPServer) -> None:
     def handler(request: Request) -> Response:
         state["count"] += 1
         if state["count"] <= 2:
-            return Response("slow down", status=429, headers={"Retry-After": "1"})
+            return Response(
+                "slow down", status=429, headers={"Retry-After": "1"}
+            )
         return Response("ok", status=200)
 
     httpserver.expect_request("/shared").respond_with_handler(handler)
@@ -149,7 +153,9 @@ async def test_header_override(httpserver: HTTPServer) -> None:
 
 
 async def test_per_request_params(httpserver: HTTPServer) -> None:
-    httpserver.expect_request("/params", query_string="key=value").respond_with_data(
+    httpserver.expect_request(
+        "/params", query_string="key=value"
+    ).respond_with_data(
         "ok",
         status=200,
     )

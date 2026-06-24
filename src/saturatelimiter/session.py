@@ -43,8 +43,8 @@ class Session:
         >>> from saturatelimiter import Session
         >>>
         >>> async def fetch():
-        ...     with Session(headers={"Accept": "application/json"}) as session:
-        ...         return await session.get("https://httpbin.org/get")
+        ...   with Session(headers={"Accept": "application/json"}) as session:
+        ...     return await session.get("https://httpbin.org/get")
         ...
         >>> asyncio.run(fetch()).status_code
         200
@@ -56,7 +56,8 @@ class Session:
         num_threads: int | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        """Configure a new session (enter the context manager before requesting).
+        """
+        Configure a new session (enter the context manager before requesting).
 
         Args:
             num_threads: Maximum concurrent worker threads. Defaults to
@@ -93,12 +94,16 @@ class Session:
         self._rate_limit = RateLimitLock()
         self._session_lock = Lock()
         workers = (
-            self._num_threads if self._num_threads is not None else _default_threads()
+            self._num_threads
+            if self._num_threads is not None
+            else _default_threads()
         )
         self._executor = ThreadPoolExecutor(max_workers=workers)
         return self
 
-    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+    def __exit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> None:
         """Shut down workers and close the underlying ``requests.Session``."""
         if self._executor is not None:
             self._executor.shutdown(wait=True, cancel_futures=True)
@@ -113,12 +118,21 @@ class Session:
         self,
     ) -> tuple[ThreadPoolExecutor, requests.Session, RateLimitLock, Lock]:
         if self._executor is None or self._session is None:
-            raise RuntimeError("Session is not active; use it as a context manager")
+            raise RuntimeError(
+                "Session is not active; use it as a context manager"
+            )
         assert self._rate_limit is not None
         assert self._session_lock is not None
-        return self._executor, self._session, self._rate_limit, self._session_lock
+        return (
+            self._executor,
+            self._session,
+            self._rate_limit,
+            self._session_lock,
+        )
 
-    def _sync_request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+    def _sync_request(
+        self, method: str, url: str, **kwargs: Any
+    ) -> requests.Response:
         _, session, rate_limit, session_lock = self._ensure_active()
         while True:
             rate_limit.wait_if_needed()
@@ -126,12 +140,16 @@ class Session:
                 response = session.request(method, url, **kwargs)
             if response.status_code != 429:
                 return response
-            retry_after = parse_retry_after(response.headers.get("Retry-After"))
+            retry_after = parse_retry_after(
+                response.headers.get("Retry-After")
+            )
             if retry_after is None:
                 return response
             rate_limit.extend(retry_after)
 
-    async def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+    async def request(
+        self, method: str, url: str, **kwargs: Any
+    ) -> requests.Response:
         """Submit an HTTP request and await the response.
 
         Executes on a worker thread using the shared ``requests.Session``.
@@ -140,9 +158,10 @@ class Session:
         Args:
             method: HTTP method (e.g. ``"GET"``, ``"POST"``).
             url: Request URL.
-            **kwargs: Per-request options passed to ``requests.Session.request``,
-                including ``params``, ``data``, ``headers``, ``cookies``,
-                ``files``, ``auth``, ``timeout``, ``allow_redirects``,
+            **kwargs: Per-request options passed to
+                ``requests.Session.request``, including ``params``, ``data``,
+                ``headers``, ``cookies``, ``files``, ``auth``, ``timeout``,
+                ``allow_redirects``, ``proxies``, ``hooks``, ``stream``,
                 ``proxies``, ``hooks``, ``stream``, ``verify``, ``cert``,
                 and ``json``.
 
@@ -162,7 +181,11 @@ class Session:
             >>>
             >>> async def example():
             ...     with Session() as session:
-            ...         return await session.request("GET", "https://httpbin.org/get")
+            ...         return await session.request(
+            ...             "GET",
+            ...             "https://httpbin.org/get",
+            ...             headers={"Accept": "application/json"},
+            ...         )
             ...
             >>> asyncio.run(example()).status_code
             200
