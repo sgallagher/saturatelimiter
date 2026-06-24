@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import threading
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
 from typing import Any
 
 import requests
@@ -24,10 +24,11 @@ class Session:
     """Thread-pooled HTTP client with global 429 ``Retry-After`` coordination.
 
     Use as an async context manager (``async with Session(...) as session:``)
-    to create a shared ``requests.Session``, worker thread pool, and global
-    rate-limit lock. Submit work through async methods such as :meth:`request`
-    and :meth:`get`; each call is executed on a worker thread and returns an
-    awaitable ``requests.Response``.
+    to start a worker thread pool and global rate-limit coordination. Each
+    worker thread uses its own ``requests.Session`` so multiple HTTP requests
+    can execute concurrently. Submit work through async methods such as
+    :meth:`request` and :meth:`get`; each call is executed on a worker thread
+    and returns an awaitable ``requests.Response``.
 
     When any worker receives HTTP 429 and a parseable ``Retry-After`` header,
     all workers pause starting new requests until that window expires, then
@@ -67,18 +68,18 @@ class Session:
             num_threads: Maximum concurrent worker threads. Defaults to
                 ``os.process_cpu_count()`` when available, otherwise
                 ``os.cpu_count()``, falling back to ``1``.
-            headers: Optional default headers applied to every request via the
-                underlying ``requests.Session``. Per-request ``headers=``
+            headers: Optional default headers applied to every request via each
+                worker's ``requests.Session``. Per-request ``headers=``
                 override these values by key.
         """
         if num_threads is not None and num_threads < 1:
             raise ValueError("num_threads must be at least 1")
         self._num_threads = num_threads
         self._headers = dict(headers) if headers is not None else None
-        self._session: requests.Session | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._rate_limit: RateLimitLock | None = None
-        self._session_lock: Lock | None = None
+        self._thread_local = threading.local()
+        self._sessions: list[requests.Session] = []
 
     async def __aenter__(self) -> Session:
         """Enter the session context and start the worker thread pool.
@@ -92,11 +93,9 @@ class Session:
         if self._executor is not None:
             raise RuntimeError("Session is already active")
 
-        self._session = requests.Session()
-        if self._headers:
-            self._session.headers.update(self._headers)
         self._rate_limit = RateLimitLock()
-        self._session_lock = Lock()
+        self._thread_local = threading.local()
+        self._sessions = []
         workers = (
             self._num_threads
             if self._num_threads is not None
@@ -108,7 +107,7 @@ class Session:
     async def __aexit__(
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> None:
-        """Shut down workers and close the underlying ``requests.Session``."""
+        """Shut down workers and close per-thread sessions."""
         if self._executor is not None:
             executor = self._executor
             self._executor = None
@@ -117,36 +116,39 @@ class Session:
                 None,
                 lambda: executor.shutdown(wait=True, cancel_futures=True),
             )
-        if self._session is not None:
-            self._session.close()
-            self._session = None
+        for session in self._sessions:
+            session.close()
+        self._sessions.clear()
         self._rate_limit = None
-        self._session_lock = None
 
     def _ensure_active(
         self,
-    ) -> tuple[ThreadPoolExecutor, requests.Session, RateLimitLock, Lock]:
-        if self._executor is None or self._session is None:
+    ) -> tuple[ThreadPoolExecutor, RateLimitLock]:
+        if self._executor is None:
             raise RuntimeError(
                 "Session is not active; use it as an async context manager"
             )
         assert self._rate_limit is not None
-        assert self._session_lock is not None
-        return (
-            self._executor,
-            self._session,
-            self._rate_limit,
-            self._session_lock,
-        )
+        return self._executor, self._rate_limit
+
+    def _get_thread_session(self) -> requests.Session:
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            if self._headers:
+                session.headers.update(self._headers)
+            self._thread_local.session = session
+            self._sessions.append(session)
+        return session
 
     def _sync_request(
         self, method: str, url: str, **kwargs: Any
     ) -> requests.Response:
-        _, session, rate_limit, session_lock = self._ensure_active()
+        _, rate_limit = self._ensure_active()
+        session = self._get_thread_session()
         while True:
             rate_limit.wait_if_needed()
-            with session_lock:
-                response = session.request(method, url, **kwargs)
+            response = session.request(method, url, **kwargs)
             if response.status_code != 429:
                 return response
             retry_after = parse_retry_after(
@@ -161,7 +163,7 @@ class Session:
     ) -> requests.Response:
         """Submit an HTTP request and await the response.
 
-        Executes on a worker thread using the shared ``requests.Session``.
+        Executes on a worker thread using that thread's ``requests.Session``.
         Accepts the same keyword arguments as ``requests.Session.request``.
 
         Args:
@@ -171,8 +173,7 @@ class Session:
                 ``requests.Session.request``, including ``params``, ``data``,
                 ``headers``, ``cookies``, ``files``, ``auth``, ``timeout``,
                 ``allow_redirects``, ``proxies``, ``hooks``, ``stream``,
-                ``proxies``, ``hooks``, ``stream``, ``verify``, ``cert``,
-                and ``json``.
+                ``verify``, ``cert``, and ``json``.
 
         Returns:
             The ``requests.Response`` from the server. On HTTP 429, the call
@@ -199,7 +200,7 @@ class Session:
             >>> asyncio.run(example()).status_code
             200
         """
-        executor, _, _, _ = self._ensure_active()
+        executor, _ = self._ensure_active()
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
             executor,
