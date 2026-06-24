@@ -1,0 +1,7 @@
+requires = ["tox>=4.40", "tox-uv>=1.0"]
+env_list = ["py311", "py312", "py313", "py314", "py315"]
+
+[env_run_base]
+description = "run tests with {base_python}"
+dependency_groups = ["dev"]
+commands = [["pytest", "tests"]]
