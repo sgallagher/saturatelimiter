@@ -23,10 +23,10 @@ def _default_threads() -> int:
 class Session:
     """Thread-pooled HTTP client with global 429 ``Retry-After`` coordination.
 
-    Use as a synchronous context manager (``with Session(...) as session:``) to
-    create a shared ``requests.Session``, worker thread pool, and global rate-
-    limit lock. Submit work through async methods such as :meth:`request` and
-    :meth:`get`; each call is executed on a worker thread and returns an
+    Use as an async context manager (``async with Session(...) as session:``)
+    to create a shared ``requests.Session``, worker thread pool, and global
+    rate-limit lock. Submit work through async methods such as :meth:`request`
+    and :meth:`get`; each call is executed on a worker thread and returns an
     awaitable ``requests.Response``.
 
     When any worker receives HTTP 429 and a parseable ``Retry-After`` header,
@@ -43,8 +43,10 @@ class Session:
         >>> from saturatelimiter import Session
         >>>
         >>> async def fetch():
-        ...   with Session(headers={"Accept": "application/json"}) as session:
-        ...     return await session.get("https://httpbin.org/get")
+        ...     async with Session(
+        ...         headers={"Accept": "application/json"},
+        ...     ) as session:
+        ...         return await session.get("https://httpbin.org/get")
         ...
         >>> asyncio.run(fetch()).status_code
         200
@@ -57,7 +59,9 @@ class Session:
         headers: Mapping[str, str] | None = None,
     ) -> None:
         """
-        Configure a new session (enter the context manager before requesting).
+        Configure a new session.
+
+        Enter the async context manager before making requests.
 
         Args:
             num_threads: Maximum concurrent worker threads. Defaults to
@@ -76,7 +80,7 @@ class Session:
         self._rate_limit: RateLimitLock | None = None
         self._session_lock: Lock | None = None
 
-    def __enter__(self) -> Session:
+    async def __aenter__(self) -> Session:
         """Enter the session context and start the worker thread pool.
 
         Returns:
@@ -101,13 +105,18 @@ class Session:
         self._executor = ThreadPoolExecutor(max_workers=workers)
         return self
 
-    def __exit__(
+    async def __aexit__(
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> None:
         """Shut down workers and close the underlying ``requests.Session``."""
         if self._executor is not None:
-            self._executor.shutdown(wait=True, cancel_futures=True)
+            executor = self._executor
             self._executor = None
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: executor.shutdown(wait=True, cancel_futures=True),
+            )
         if self._session is not None:
             self._session.close()
             self._session = None
@@ -119,7 +128,7 @@ class Session:
     ) -> tuple[ThreadPoolExecutor, requests.Session, RateLimitLock, Lock]:
         if self._executor is None or self._session is None:
             raise RuntimeError(
-                "Session is not active; use it as a context manager"
+                "Session is not active; use it as an async context manager"
             )
         assert self._rate_limit is not None
         assert self._session_lock is not None
@@ -171,7 +180,7 @@ class Session:
             parseable; otherwise the 429 response is returned immediately.
 
         Raises:
-            RuntimeError: If called outside the context manager.
+            RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors from
                 ``requests``.
 
@@ -180,7 +189,7 @@ class Session:
             >>> from saturatelimiter import Session
             >>>
             >>> async def example():
-            ...     with Session() as session:
+            ...     async with Session() as session:
             ...         return await session.request(
             ...             "GET",
             ...             "https://httpbin.org/get",
@@ -211,7 +220,7 @@ class Session:
             429 retry behavior.
 
         Raises:
-            RuntimeError: If called outside the context manager.
+            RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
         return await self.request("GET", url, **kwargs)
@@ -229,7 +238,7 @@ class Session:
             429 retry behavior.
 
         Raises:
-            RuntimeError: If called outside the context manager.
+            RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
         return await self.request("POST", url, **kwargs)
@@ -246,7 +255,7 @@ class Session:
             429 retry behavior.
 
         Raises:
-            RuntimeError: If called outside the context manager.
+            RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
         return await self.request("PUT", url, **kwargs)
@@ -263,7 +272,7 @@ class Session:
             429 retry behavior.
 
         Raises:
-            RuntimeError: If called outside the context manager.
+            RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
         return await self.request("PATCH", url, **kwargs)
@@ -280,7 +289,7 @@ class Session:
             429 retry behavior.
 
         Raises:
-            RuntimeError: If called outside the context manager.
+            RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
         return await self.request("DELETE", url, **kwargs)
@@ -297,7 +306,7 @@ class Session:
             429 retry behavior.
 
         Raises:
-            RuntimeError: If called outside the context manager.
+            RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
         return await self.request("HEAD", url, **kwargs)
@@ -314,7 +323,7 @@ class Session:
             429 retry behavior.
 
         Raises:
-            RuntimeError: If called outside the context manager.
+            RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
         return await self.request("OPTIONS", url, **kwargs)

@@ -10,7 +10,7 @@ import asyncio
 from saturatelimiter import Session
 
 async def main():
-    with Session(
+    async with Session(
         num_threads=4,
         headers={"User-Agent": "saturatelimiter/0.1"},
     ) as session:
