@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 from saturatelimiter._ratelimit import RateLimitLock, parse_retry_after
+from saturatelimiter._retry import TransientHTTPError, execute_request
 
 
 def _default_threads() -> int:
@@ -34,6 +35,10 @@ class Session:
     all workers pause starting new requests until that window expires, then
     the affected request is retried. Responses with status 429 but no
     ``Retry-After`` header are returned to the caller without retrying.
+
+    Transient server errors (HTTP 500, 502, 503, and 504) and connection
+    failures are retried automatically with exponential backoff via
+    ``tenacity`` before a response is returned or an error is raised.
 
     Default request headers may be set at construction time; per-request
     ``headers=`` keyword arguments override those defaults using
@@ -148,7 +153,12 @@ class Session:
         session = self._get_thread_session()
         while True:
             rate_limit.wait_if_needed()
-            response = session.request(method, url, **kwargs)
+            try:
+                response = execute_request(
+                    session, method, url, **kwargs
+                )
+            except TransientHTTPError as exc:
+                return exc.response
             if response.status_code != 429:
                 return response
             retry_after = parse_retry_after(
@@ -179,11 +189,14 @@ class Session:
             The ``requests.Response`` from the server. On HTTP 429, the call
             retries automatically when ``Retry-After`` is present and
             parseable; otherwise the 429 response is returned immediately.
+            HTTP 500, 502, 503, and 504 responses are retried with
+            exponential backoff; the last response is returned if retries
+            are exhausted.
 
         Raises:
             RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors from
-                ``requests``.
+                ``requests`` after transient-error retries are exhausted.
 
         Example:
             >>> import asyncio
@@ -218,7 +231,7 @@ class Session:
 
         Returns:
             The ``requests.Response`` from the server. See :meth:`request` for
-            429 retry behavior.
+            429 and transient-error retry behavior.
 
         Raises:
             RuntimeError: If called outside the async context manager.
@@ -236,7 +249,7 @@ class Session:
 
         Returns:
             The ``requests.Response`` from the server. See :meth:`request` for
-            429 retry behavior.
+            429 and transient-error retry behavior.
 
         Raises:
             RuntimeError: If called outside the async context manager.
@@ -253,7 +266,7 @@ class Session:
 
         Returns:
             The ``requests.Response`` from the server. See :meth:`request` for
-            429 retry behavior.
+            429 and transient-error retry behavior.
 
         Raises:
             RuntimeError: If called outside the async context manager.
@@ -270,7 +283,7 @@ class Session:
 
         Returns:
             The ``requests.Response`` from the server. See :meth:`request` for
-            429 retry behavior.
+            429 and transient-error retry behavior.
 
         Raises:
             RuntimeError: If called outside the async context manager.
@@ -287,7 +300,7 @@ class Session:
 
         Returns:
             The ``requests.Response`` from the server. See :meth:`request` for
-            429 retry behavior.
+            429 and transient-error retry behavior.
 
         Raises:
             RuntimeError: If called outside the async context manager.
@@ -304,7 +317,7 @@ class Session:
 
         Returns:
             The ``requests.Response`` from the server. See :meth:`request` for
-            429 retry behavior.
+            429 and transient-error retry behavior.
 
         Raises:
             RuntimeError: If called outside the async context manager.
@@ -321,7 +334,7 @@ class Session:
 
         Returns:
             The ``requests.Response`` from the server. See :meth:`request` for
-            429 retry behavior.
+            429 and transient-error retry behavior.
 
         Raises:
             RuntimeError: If called outside the async context manager.

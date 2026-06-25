@@ -7,9 +7,11 @@ import time
 
 import pytest
 from pytest_httpserver import HTTPServer
+from tenacity import wait_fixed
 from werkzeug.wrappers import Request, Response
 
 from saturatelimiter import Session
+from saturatelimiter._retry import _TRANSIENT_RETRY_ATTEMPTS, execute_request
 
 
 @pytest.fixture
@@ -74,6 +76,44 @@ async def test_429_then_200(httpserver: HTTPServer) -> None:
         response = await session.get(httpserver.url_for("/retry"))
     assert response.status_code == 200
     assert state["count"] == 2
+
+
+async def test_500_then_200(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(execute_request.retry, "wait", wait_fixed(0))
+    state = {"count": 0}
+
+    def handler(request: Request) -> Response:
+        state["count"] += 1
+        if state["count"] == 1:
+            return Response("error", status=500)
+        return Response("ok", status=200)
+
+    httpserver.expect_request("/server-error").respond_with_handler(handler)
+    async with Session() as session:
+        response = await session.get(httpserver.url_for("/server-error"))
+    assert response.status_code == 200
+    assert state["count"] == 2
+
+
+async def test_500_exhausted_retries(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(execute_request.retry, "wait", wait_fixed(0))
+    state = {"count": 0}
+
+    def handler(request: Request) -> Response:
+        state["count"] += 1
+        return Response("error", status=500)
+
+    httpserver.expect_request("/always-fail").respond_with_handler(handler)
+    async with Session() as session:
+        response = await session.get(httpserver.url_for("/always-fail"))
+    assert response.status_code == 500
+    assert state["count"] == _TRANSIENT_RETRY_ATTEMPTS
 
 
 async def test_429_without_retry_after(httpserver: HTTPServer) -> None:

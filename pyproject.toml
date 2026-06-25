@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.31",
+    "tenacity>=8.0",
 ]
 
 [project.urls]
