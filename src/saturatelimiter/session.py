@@ -13,7 +13,12 @@ from typing import Any
 import requests
 
 from saturatelimiter._ratelimit import RateLimitLock, parse_retry_after
-from saturatelimiter._retry import TransientHTTPError, execute_request
+from saturatelimiter._retry import (
+    DEFAULT_TRANSIENT_RETRY_ATTEMPTS,
+    TransientHTTPError,
+    _validate_attempts,
+    execute_request,
+)
 
 
 def _default_threads() -> int:
@@ -63,6 +68,7 @@ class Session:
         *,
         num_threads: int | None = None,
         headers: Mapping[str, str] | None = None,
+        transient_retry_attempts: int | None = None,
     ) -> None:
         """
         Configure a new session.
@@ -76,11 +82,23 @@ class Session:
             headers: Optional default headers applied to every request via each
                 worker's ``requests.Session``. Per-request ``headers=``
                 override these values by key.
+            transient_retry_attempts: Maximum attempts for transient HTTP
+                errors (500, 502, 503, 504) and connection failures.
+                Defaults to ``DEFAULT_TRANSIENT_RETRY_ATTEMPTS`` (10).
+                Per-request ``transient_retry_attempts=`` overrides this
+                value.
         """
         if num_threads is not None and num_threads < 1:
             raise ValueError("num_threads must be at least 1")
+        attempts = (
+            transient_retry_attempts
+            if transient_retry_attempts is not None
+            else DEFAULT_TRANSIENT_RETRY_ATTEMPTS
+        )
+        _validate_attempts(attempts)
         self._num_threads = num_threads
         self._headers = dict(headers) if headers is not None else None
+        self._transient_retry_attempts = attempts
         self._executor: ThreadPoolExecutor | None = None
         self._rate_limit: RateLimitLock | None = None
         self._thread_local = threading.local()
@@ -147,15 +165,30 @@ class Session:
         return session
 
     def _sync_request(
-        self, method: str, url: str, **kwargs: Any
+        self,
+        method: str,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
     ) -> requests.Response:
         _, rate_limit = self._ensure_active()
         session = self._get_thread_session()
+        attempts = (
+            transient_retry_attempts
+            if transient_retry_attempts is not None
+            else self._transient_retry_attempts
+        )
+        _validate_attempts(attempts)
         while True:
             rate_limit.wait_if_needed()
             try:
                 response = execute_request(
-                    session, method, url, **kwargs
+                    session,
+                    method,
+                    url,
+                    attempts=attempts,
+                    **kwargs,
                 )
             except TransientHTTPError as exc:
                 return exc.response
@@ -169,7 +202,12 @@ class Session:
             rate_limit.extend(retry_after)
 
     async def request(
-        self, method: str, url: str, **kwargs: Any
+        self,
+        method: str,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
     ) -> requests.Response:
         """Submit an HTTP request and await the response.
 
@@ -179,6 +217,9 @@ class Session:
         Args:
             method: HTTP method (e.g. ``"GET"``, ``"POST"``).
             url: Request URL.
+            transient_retry_attempts: Maximum attempts for transient HTTP
+                errors and connection failures for this request only.
+                Overrides the session constructor default when set.
             **kwargs: Per-request options passed to
                 ``requests.Session.request``, including ``params``, ``data``,
                 ``headers``, ``cookies``, ``files``, ``auth``, ``timeout``,
@@ -217,15 +258,29 @@ class Session:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
             executor,
-            functools.partial(self._sync_request, method, url, **kwargs),
+            functools.partial(
+                self._sync_request,
+                method,
+                url,
+                transient_retry_attempts=transient_retry_attempts,
+                **kwargs,
+            ),
         )
         return await asyncio.wrap_future(future)
 
-    async def get(self, url: str, **kwargs: Any) -> requests.Response:
+    async def get(
+        self,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """Submit an HTTP GET request and await the response.
 
         Args:
             url: Request URL.
+            transient_retry_attempts: Per-request transient retry limit.
+                Overrides the session default when set.
             **kwargs: Per-request options passed to :meth:`request`, such as
                 ``params``, ``headers``, and ``timeout``.
 
@@ -237,13 +292,26 @@ class Session:
             RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
-        return await self.request("GET", url, **kwargs)
+        return await self.request(
+            "GET",
+            url,
+            transient_retry_attempts=transient_retry_attempts,
+            **kwargs,
+        )
 
-    async def post(self, url: str, **kwargs: Any) -> requests.Response:
+    async def post(
+        self,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """Submit an HTTP POST request and await the response.
 
         Args:
             url: Request URL.
+            transient_retry_attempts: Per-request transient retry limit.
+                Overrides the session default when set.
             **kwargs: Per-request options passed to :meth:`request`, such as
                 ``data``, ``json``, ``headers``, and ``timeout``.
 
@@ -255,13 +323,26 @@ class Session:
             RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
-        return await self.request("POST", url, **kwargs)
+        return await self.request(
+            "POST",
+            url,
+            transient_retry_attempts=transient_retry_attempts,
+            **kwargs,
+        )
 
-    async def put(self, url: str, **kwargs: Any) -> requests.Response:
+    async def put(
+        self,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """Submit an HTTP PUT request and await the response.
 
         Args:
             url: Request URL.
+            transient_retry_attempts: Per-request transient retry limit.
+                Overrides the session default when set.
             **kwargs: Per-request options passed to :meth:`request`.
 
         Returns:
@@ -272,13 +353,26 @@ class Session:
             RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
-        return await self.request("PUT", url, **kwargs)
+        return await self.request(
+            "PUT",
+            url,
+            transient_retry_attempts=transient_retry_attempts,
+            **kwargs,
+        )
 
-    async def patch(self, url: str, **kwargs: Any) -> requests.Response:
+    async def patch(
+        self,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """Submit an HTTP PATCH request and await the response.
 
         Args:
             url: Request URL.
+            transient_retry_attempts: Per-request transient retry limit.
+                Overrides the session default when set.
             **kwargs: Per-request options passed to :meth:`request`.
 
         Returns:
@@ -289,13 +383,26 @@ class Session:
             RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
-        return await self.request("PATCH", url, **kwargs)
+        return await self.request(
+            "PATCH",
+            url,
+            transient_retry_attempts=transient_retry_attempts,
+            **kwargs,
+        )
 
-    async def delete(self, url: str, **kwargs: Any) -> requests.Response:
+    async def delete(
+        self,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """Submit an HTTP DELETE request and await the response.
 
         Args:
             url: Request URL.
+            transient_retry_attempts: Per-request transient retry limit.
+                Overrides the session default when set.
             **kwargs: Per-request options passed to :meth:`request`.
 
         Returns:
@@ -306,13 +413,26 @@ class Session:
             RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
-        return await self.request("DELETE", url, **kwargs)
+        return await self.request(
+            "DELETE",
+            url,
+            transient_retry_attempts=transient_retry_attempts,
+            **kwargs,
+        )
 
-    async def head(self, url: str, **kwargs: Any) -> requests.Response:
+    async def head(
+        self,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """Submit an HTTP HEAD request and await the response.
 
         Args:
             url: Request URL.
+            transient_retry_attempts: Per-request transient retry limit.
+                Overrides the session default when set.
             **kwargs: Per-request options passed to :meth:`request`.
 
         Returns:
@@ -323,13 +443,26 @@ class Session:
             RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
-        return await self.request("HEAD", url, **kwargs)
+        return await self.request(
+            "HEAD",
+            url,
+            transient_retry_attempts=transient_retry_attempts,
+            **kwargs,
+        )
 
-    async def options(self, url: str, **kwargs: Any) -> requests.Response:
+    async def options(
+        self,
+        url: str,
+        *,
+        transient_retry_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
         """Submit an HTTP OPTIONS request and await the response.
 
         Args:
             url: Request URL.
+            transient_retry_attempts: Per-request transient retry limit.
+                Overrides the session default when set.
             **kwargs: Per-request options passed to :meth:`request`.
 
         Returns:
@@ -340,4 +473,9 @@ class Session:
             RuntimeError: If called outside the async context manager.
             requests.RequestException: On connection or transport errors.
         """
-        return await self.request("OPTIONS", url, **kwargs)
+        return await self.request(
+            "OPTIONS",
+            url,
+            transient_retry_attempts=transient_retry_attempts,
+            **kwargs,
+        )

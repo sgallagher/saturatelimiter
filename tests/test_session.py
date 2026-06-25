@@ -11,7 +11,7 @@ from tenacity import wait_fixed
 from werkzeug.wrappers import Request, Response
 
 from saturatelimiter import Session
-from saturatelimiter._retry import _TRANSIENT_RETRY_ATTEMPTS, execute_request
+from saturatelimiter._retry import DEFAULT_TRANSIENT_RETRY_ATTEMPTS
 
 
 @pytest.fixture
@@ -82,7 +82,10 @@ async def test_500_then_200(
     httpserver: HTTPServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(execute_request.retry, "wait", wait_fixed(0))
+    monkeypatch.setattr(
+        "saturatelimiter._retry._TRANSIENT_RETRY_WAIT",
+        wait_fixed(0),
+    )
     state = {"count": 0}
 
     def handler(request: Request) -> Response:
@@ -102,7 +105,11 @@ async def test_500_exhausted_retries(
     httpserver: HTTPServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(execute_request.retry, "wait", wait_fixed(0))
+    """Transient retries exhausted: return last 500, no further attempts."""
+    monkeypatch.setattr(
+        "saturatelimiter._retry._TRANSIENT_RETRY_WAIT",
+        wait_fixed(0),
+    )
     state = {"count": 0}
 
     def handler(request: Request) -> Response:
@@ -113,7 +120,54 @@ async def test_500_exhausted_retries(
     async with Session() as session:
         response = await session.get(httpserver.url_for("/always-fail"))
     assert response.status_code == 500
-    assert state["count"] == _TRANSIENT_RETRY_ATTEMPTS
+    assert state["count"] == DEFAULT_TRANSIENT_RETRY_ATTEMPTS
+
+
+async def test_session_transient_retry_attempts(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "saturatelimiter._retry._TRANSIENT_RETRY_WAIT",
+        wait_fixed(0),
+    )
+    state = {"count": 0}
+
+    def handler(request: Request) -> Response:
+        state["count"] += 1
+        return Response("error", status=500)
+
+    httpserver.expect_request("/session-retries").respond_with_handler(handler)
+    async with Session(transient_retry_attempts=3) as session:
+        response = await session.get(httpserver.url_for("/session-retries"))
+    assert response.status_code == 500
+    assert state["count"] == 3
+
+
+async def test_request_transient_retry_attempts_override(
+    httpserver: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "saturatelimiter._retry._TRANSIENT_RETRY_WAIT",
+        wait_fixed(0),
+    )
+    state = {"count": 0}
+
+    def handler(request: Request) -> Response:
+        state["count"] += 1
+        return Response("error", status=500)
+
+    httpserver.expect_request("/override-retries").respond_with_handler(
+        handler
+    )
+    async with Session(transient_retry_attempts=5) as session:
+        response = await session.get(
+            httpserver.url_for("/override-retries"),
+            transient_retry_attempts=2,
+        )
+    assert response.status_code == 500
+    assert state["count"] == 2
 
 
 async def test_429_without_retry_after(httpserver: HTTPServer) -> None:
@@ -216,3 +270,8 @@ async def test_request_outside_context_manager() -> None:
 async def test_invalid_num_threads() -> None:
     with pytest.raises(ValueError, match="num_threads"):
         Session(num_threads=0)
+
+
+async def test_invalid_transient_retry_attempts_on_session() -> None:
+    with pytest.raises(ValueError, match="transient_retry_attempts"):
+        Session(transient_retry_attempts=0)
